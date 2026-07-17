@@ -26,3 +26,7 @@ model/
 # Downloaded public motion data
 humanoidverse/data/lafan_29dof_10s-clipped.pkl
 humanoidverse/data/lafan_29dof.pkl
+
+# Adam SP motion data (large files)
+humanoidverse/data/adam_sp_motion_train.pkl
+humanoidverse/data/adam_sp_motion_infer.pkl

@@ -1,0 +1,162 @@
+name: adam_sp_29dof
+xml_path: humanoidverse/data/robots/adam_sp_mjlab/adam_sp.xml
+
+base_body: pelvis
+root_quat_order: xyzw
+coordinate_system: z_up
+dof_unit: rad
+
+control_joints:
+  mode: all_actuated
+
+feet:
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+
+hands:
+  - left_wrist_roll_link
+  - right_wrist_roll_link
+
+key_bodies:
+  - pelvis
+  - torso_link
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+  - left_wrist_roll_link
+  - right_wrist_roll_link
+
+default_dof_pos: {}
+
+training:
+  hydra_robot: adam_sp/adam_sp_29dof_hard_waist
+  hydra_overrides:
+    - env.config.lie_down_init=True
+    - env.config.lie_down_init_prob=0.3
+
+  semantics:
+    contact_bodies:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+    undesired_contact_bodies:
+      - pelvis
+      - shoulder
+      - hip
+    torso_name: torso_link
+    left_ankle_dof_names:
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+    right_ankle_dof_names:
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+
+  init_state:
+    pos: [0.0, 0.0, 0.89]
+    rot: [0.0, 0.0, 0.0, 1.0]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles:
+      left_hip_pitch_joint: -0.32
+      left_hip_roll_joint: 0.0
+      left_hip_yaw_joint: -0.18
+      left_knee_joint: 0.66
+      left_ankle_pitch_joint: -0.39
+      left_ankle_roll_joint: 0.0
+      right_hip_pitch_joint: -0.32
+      right_hip_roll_joint: 0.0
+      right_hip_yaw_joint: 0.18
+      right_knee_joint: 0.66
+      right_ankle_pitch_joint: -0.39
+      right_ankle_roll_joint: 0.0
+      waist_roll_joint: 0.0
+      waist_pitch_joint: 0.0
+      waist_yaw_joint: 0.0
+      left_shoulder_pitch_joint: 0.0
+      left_shoulder_roll_joint: 0.1
+      left_shoulder_yaw_joint: 0.0
+      left_elbow_joint: -0.3
+      left_wrist_yaw_joint: 0.0
+      left_wrist_pitch_joint: 0.0
+      left_wrist_roll_joint: 0.0
+      right_shoulder_pitch_joint: 0.0
+      right_shoulder_roll_joint: -0.1
+      right_shoulder_yaw_joint: 0.0
+      right_elbow_joint: -0.3
+      right_wrist_yaw_joint: 0.0
+      right_wrist_pitch_joint: 0.0
+      right_wrist_roll_joint: 0.0
+
+  control:
+    action_scale: 0.25
+    action_clip_value: 5.0
+    normalize_action_to: 5.0
+    effort_limit_scale: 0.8
+    # Order: legL(6) + legR(6) + waist(3,roll/pitch/yaw) + armL(7,yaw/pitch/roll) + armR(7)
+    effort_limit: [230.0, 180.0, 105.0, 230.0, 80.0, 40.0, 230.0, 180.0, 105.0, 230.0, 80.0, 40.0, 150.0, 150.0, 150.0, 65.0, 65.0, 65.0, 30.0, 6.4, 6.4, 6.4, 65.0, 65.0, 65.0, 30.0, 6.4, 6.4, 6.4]
+    velocity_limit: [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0]
+    stiffness:
+      hip_pitch: 300.0
+      hip_roll: 600.0
+      hip_yaw: 300.0
+      knee: 300.0
+      ankle_pitch: 130.0
+      ankle_roll: 70.0
+      waist_roll: 400.0
+      waist_pitch: 400.0
+      waist_yaw: 400.0
+      shoulder_pitch: 60.0
+      shoulder_roll: 60.0
+      shoulder_yaw: 60.0
+      elbow: 60.0
+      wrist_roll: 20.0
+      wrist_pitch: 20.0
+      wrist_yaw: 20.0
+    damping:
+      hip_pitch: 7.0
+      hip_roll: 10.0
+      hip_yaw: 2.0
+      knee: 7.0
+      ankle_pitch: 3.5
+      ankle_roll: 2.0
+      waist_roll: 11.0
+      waist_pitch: 11.0
+      waist_yaw: 11.0
+      shoulder_pitch: 3.0
+      shoulder_roll: 3.0
+      shoulder_yaw: 3.0
+      elbow: 3.0
+      wrist_roll: 1.0
+      wrist_pitch: 1.0
+      wrist_yaw: 1.0
+
+  actuator:
+    source: yaml
+    joints:
+      left_hip_pitch_joint:    {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
+      left_hip_roll_joint:     {effort_limit: 180.0, velocity_limit: 60.0, armature: 0.281573, friction: 4.216}
+      left_hip_yaw_joint:      {effort_limit: 105.0, velocity_limit: 60.0, armature: 0.23409, friction: 3.774}
+      left_knee_joint:         {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
+      left_ankle_pitch_joint:  {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      left_ankle_roll_joint:   {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      right_hip_pitch_joint:   {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
+      right_hip_roll_joint:    {effort_limit: 180.0, velocity_limit: 60.0, armature: 0.281573, friction: 4.216}
+      right_hip_yaw_joint:     {effort_limit: 105.0, velocity_limit: 60.0, armature: 0.23409, friction: 3.774}
+      right_knee_joint:        {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
+      right_ankle_pitch_joint: {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      right_ankle_roll_joint:  {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      waist_roll_joint:        {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}
+      waist_pitch_joint:       {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}
+      waist_yaw_joint:         {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}
+      left_shoulder_pitch_joint:  {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.7548}
+      left_shoulder_roll_joint:   {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.7548}
+      left_shoulder_yaw_joint:    {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      left_elbow_joint:           {effort_limit: 30.0, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      left_wrist_yaw_joint:       {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 3.213}
+      left_wrist_pitch_joint:     {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      left_wrist_roll_joint:      {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      right_shoulder_pitch_joint: {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.7548}
+      right_shoulder_roll_joint:  {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.7548}
+      right_shoulder_yaw_joint:   {effort_limit: 65.0, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      right_elbow_joint:          {effort_limit: 30.0, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      right_wrist_yaw_joint:      {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 3.213}
+      right_wrist_pitch_joint:    {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+      right_wrist_roll_joint:     {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}

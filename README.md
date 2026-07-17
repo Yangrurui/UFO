@@ -33,6 +33,7 @@ UFO is designed to separate the learning pipeline from robot-specific configurat
 | Capability | Status |
 | --- | --- |
 | Unitree G1 training | Supported and best tested |
+| **PND Adam SP training** | **Supported (29-DOF, robot-config driven)** |
 | Motion data: RobotState CSV / NPZ / `ufo_pkl` | Supported |
 | Multi-source data manifest | Supported |
 | Tracking inference | Robot-config aware |
@@ -236,6 +237,99 @@ Optional: run `humanoidverse.tools.data_inspect` first if you want to validate t
 
 See [Import Wizard](docs/import_wizard.md) for data schemas and import commands, and [Robot-Config Training](docs/robot_config_training.md) for required training fields, current constraints, and bring-up guidance.
 
+## Path C: Adam SP Quick Start
+
+Adam SP is a 29-DOF humanoid with different PD parameters, actuator limits, and body proportions compared to G1. UFO's robot-config system supports Adam SP through a dedicated configuration set.
+
+### 1. Requirements
+
+- Adam SP MuJoCo XML (provided in `humanoidverse/data/robots/adam_sp_mjlab/`)
+- Adam SP motion data in UFO pkl format (`dof [T, 29]`, `pose_aa [T, 30, 3]`, `root_trans_offset [T, 3]`)
+- The dof column order must match Adam SP's actuator order (see `adam_sp.xml` for reference)
+
+### 2. Run a smoke test
+
+```bash
+bash scripts/train_adam_sp.sh smoke
+```
+
+Or with raw command:
+
+```bash
+./run_train.sh \
+  --agent fb \
+  --robot-config configs/robots/adam_sp_29dof.yaml \
+  --data-path /path/to/adam_sp_motion_train.pkl \
+  --gpu-ids single \
+  --smoke \
+  --buffer-size 102400 \
+  --work-dir /tmp/ufo_smoke_adam_sp
+```
+
+### 3. Full FB training on Adam SP
+
+```bash
+# 8-GPU training
+USE_WANDB=true GPU_IDS=all bash scripts/train_adam_sp.sh train
+```
+
+Or with raw command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+./run_train.sh \
+  --agent fb \
+  --gpu-ids all \
+  --robot-config configs/robots/adam_sp_29dof.yaml \
+  --data-path /path/to/adam_sp_motion_train.pkl \
+  --num-envs 1024 \
+  --num-env-steps 192000000 \
+  --work-dir runs/ufo_fb_adam_sp \
+  --update-z-every-step 100 \
+  --buffer-size 5120000 \
+  --use-wandb \
+  --wandb-run-name ufo_fb_adam_sp
+```
+
+### 4. Tracking inference
+
+```bash
+# Save MP4 + export ONNX
+SAVE_MP4=true EXPORT_ONNX=true bash scripts/infer_adam_sp.sh tracking \
+  --model-folder runs/ufo_adam_sp --motion-list 0
+```
+
+Or with raw command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python -m humanoidverse.tracking_inference \
+  --model-folder runs/ufo_fb_adam_sp \
+  --robot-config configs/robots/adam_sp_29dof.yaml \
+  --data-path /path/to/adam_sp_motion_infer.pkl \
+  --device cuda:0 \
+  --headless \
+  --save-mp4 \
+  --motion-list 0 \
+  --export-onnx true
+```
+
+> **Note:** Goal inference for Adam SP requires a robot-specific goal JSON (`--goal-json`). The default G1 goal frames will not produce correct results.
+
+### 5. Adam SP specific parameters
+
+| Parameter | Adam SP | G1 (for comparison) |
+|-----------|---------|---------------------|
+| DOF | 29 | 29 |
+| Waist order | roll → pitch → yaw | yaw → roll → pitch |
+| Wrist order | yaw → pitch → roll | roll → pitch → yaw |
+| Hip/knee kp | 300 | 99 |
+| Hip/knee effort limit | 230 Nm | 139 Nm |
+| Waist kp | 400 | 300 |
+| Initial height | 0.89 m | 0.80 m |
+
+See [Adam SP Migration Plan](docs/adam_sp_migration_plan.md) for detailed design decisions and parameter derivations.
+
 ## Multi-source skill injection
 
 UFO supports manifest-based, source-weighted multi-source data mixing. This is useful for injecting rare agile skills, such as cartwheel motions, while preserving the base motion distribution. The dataset identity is sampled from a fixed source ratio, and prioritized sampling is applied within each source. See `configs/data/example_mix.yaml` for a compact manifest example.
@@ -245,6 +339,8 @@ UFO supports manifest-based, source-weighted multi-source data mixing. This is u
 - [Import Wizard](docs/import_wizard.md): RobotState schemas, inspection, and data building.
 - [Robot-Config Training](docs/robot_config_training.md): experimental robot-aware training initialization.
 - [Training and Inference](docs/TRAIN_INFERENCE.md): additional commands and runtime notes.
+- [Adam SP Migration Plan](docs/adam_sp_migration_plan.md): Adam SP robot bring-up design and verification.
+- [BFM Algorithm Explained](docs/bfm_algorithm_explained.md): FB/TeCH algorithm walkthrough with code references.
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy): G1 real-robot deployment and teleoperation runtime.
 
 ## Citation / License
