@@ -341,6 +341,7 @@ UFO supports manifest-based, source-weighted multi-source data mixing. This is u
 - [Training and Inference](docs/TRAIN_INFERENCE.md): additional commands and runtime notes.
 - [Adam SP Migration Plan](docs/adam_sp_migration_plan.md): Adam SP robot bring-up design and verification.
 - [BFM Algorithm Explained](docs/bfm_algorithm_explained.md): FB/TeCH algorithm walkthrough with code references.
+- [Training Metrics Guide](docs/training_metrics_guide.md): all logged metrics, their meanings, and healthy ranges.
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy): G1 real-robot deployment and teleoperation runtime.
 
 ## Citation / License
