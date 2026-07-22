@@ -29,7 +29,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # --------------- defaults ---------------
 ROBOT_CONFIG="${ROBOT_CONFIG:-configs/robots/adam_sp_29dof.yaml}"
-DATA_PATH="${DATA_PATH:-humanoidverse/data/adam_sp_motion_infer.pkl}"
+DATA_PATH="${DATA_PATH:-humanoidverse/data/adam_sp_lafan_29dof.pkl}"
 DEVICE="${DEVICE:-cuda:0}"
 HEADLESS="${HEADLESS:-true}"
 SAVE_MP4="${SAVE_MP4:-}"           # set to 'true' to enable
@@ -177,7 +177,7 @@ Modes:
 Common flags:
   --model-folder PATH       Path to training output dir (required)
   --robot-config PATH       Robot YAML (default: configs/robots/adam_sp_29dof.yaml)
-  --data-path PATH          Motion data pkl (default: humanoidverse/data/adam_sp_motion_infer.pkl)
+  --data-path PATH          Motion data pkl (default: humanoidverse/data/adam_sp_lafan_29dof.pkl, joint-limit-clamped)
 
 Environment variables:
   DEVICE              cuda:0 (default)

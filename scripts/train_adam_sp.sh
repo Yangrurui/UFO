@@ -23,7 +23,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # --------------- defaults ---------------
 AGENT="${AGENT:-fb}"
 ROBOT_CONFIG="${ROBOT_CONFIG:-configs/robots/adam_sp_29dof.yaml}"
-DATA_PATH="${DATA_PATH:-humanoidverse/data/adam_sp_motion_train.pkl}"
+DATA_PATH="${DATA_PATH:-humanoidverse/data/adam_sp_lafan_29dof_10s-clipped.pkl}"
 GPU_IDS="${GPU_IDS:-single}"
 WORK_DIR="${WORK_DIR:-runs/ufo_adam_sp}"
 NUM_ENVS="${NUM_ENVS:-1024}"
@@ -119,7 +119,7 @@ Environment variables (for 'train' mode):
   NUM_ENV_STEPS      192000000 (default) — global steps
   BUFFER_SIZE        5120000 (default) — per GPU
   WORK_DIR           runs/ufo_adam_sp (default)
-  DATA_PATH          humanoidverse/data/adam_sp_motion_train.pkl (default)
+  DATA_PATH          humanoidverse/data/adam_sp_lafan_29dof_10s-clipped.pkl (default, joint-limit-clamped)
   USE_WANDB          false (default) — set to 'true' to enable
   WANDB_RUN_NAME     ufo_fb_adam_sp (default)
 

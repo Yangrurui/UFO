@@ -135,14 +135,14 @@ training:
       left_hip_roll_joint:     {effort_limit: 180.0, velocity_limit: 60.0, armature: 0.281573, friction: 4.216}
       left_hip_yaw_joint:      {effort_limit: 105.0, velocity_limit: 60.0, armature: 0.23409, friction: 3.774}
       left_knee_joint:         {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
-      left_ankle_pitch_joint:  {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
-      left_ankle_roll_joint:   {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      left_ankle_pitch_joint:  {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.0549, friction: 0.3552}
+      left_ankle_roll_joint:   {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.0549, friction: 0.3552}
       right_hip_pitch_joint:   {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
       right_hip_roll_joint:    {effort_limit: 180.0, velocity_limit: 60.0, armature: 0.281573, friction: 4.216}
       right_hip_yaw_joint:     {effort_limit: 105.0, velocity_limit: 60.0, armature: 0.23409, friction: 3.774}
       right_knee_joint:        {effort_limit: 230.0, velocity_limit: 60.0, armature: 0.13426, friction: 1.589}
-      right_ankle_pitch_joint: {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
-      right_ankle_roll_joint:  {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.1098, friction: 0.3552}
+      right_ankle_pitch_joint: {effort_limit: 80.0, velocity_limit: 60.0, armature: 0.0549, friction: 0.3552}
+      right_ankle_roll_joint:  {effort_limit: 40.0, velocity_limit: 60.0, armature: 0.0549, friction: 0.3552}
       waist_roll_joint:        {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}
       waist_pitch_joint:       {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}
       waist_yaw_joint:         {effort_limit: 150.0, velocity_limit: 60.0, armature: 0.23409, friction: 1.887}

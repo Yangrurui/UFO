@@ -30,3 +30,7 @@ humanoidverse/data/lafan_29dof.pkl
 # Adam SP motion data (large files)
 humanoidverse/data/adam_sp_motion_train.pkl
 humanoidverse/data/adam_sp_motion_infer.pkl
+humanoidverse/data/adam_sp_lafan_29dof*.pkl
+
+# Training outputs / model artifacts
+train_models/
