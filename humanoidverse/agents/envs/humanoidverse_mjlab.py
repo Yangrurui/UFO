@@ -281,6 +281,67 @@ def _action_target_scale(config) -> torch.Tensor:
     return torch.tensor(scales, dtype=torch.float32)
 
 
+def _rpm_to_rad_s(rpm: float) -> float:
+    return float(rpm) * 0.10471975511965977  # 2*pi/60
+
+
+def _env_truthy(value) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"} if value is not None else False
+
+
+def _envelope_root(robot_training: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the optional actuator.envelope config block (empty dict if absent)."""
+    if not robot_training:
+        return {}
+    actuator = robot_training.get("actuator") or {}
+    return dict(actuator.get("envelope") or {})
+
+
+def _match_envelope_group(joint_name: str, groups: dict[str, Any]) -> dict[str, Any] | None:
+    """Match a joint to an envelope group by substring key (e.g. 'hip_pitch')."""
+    for key, spec in groups.items():
+        if key in joint_name:
+            return dict(spec)
+    return None
+
+
+def _build_torque_speed_envelope_cfg(joint_name: str, group: dict[str, Any], *, kp: float, kd: float,
+                                     armature: float | None, frictionloss: float | None):
+    """Build a TorqueSpeedEnvelopeActuatorCfg for one joint from a compact group spec.
+
+    Group schema (rpm units; efforts in Nm):
+      effort_limit, plateau_rpm, zero_rpm, motoring, braking,
+      [motoring_zero_rpm], [braking_zero_rpm]
+    Each quadrant curve = (0, plateau_rpm, quadrant_zero_rpm) -> (plateau_effort, plateau_effort, 0).
+    """
+    from humanoidverse.utils.actuators.torque_speed_envelope_actuator import TorqueSpeedEnvelopeActuatorCfg
+
+    R = _rpm_to_rad_s
+    plateau = float(group["plateau_rpm"])
+    zero = float(group["zero_rpm"])
+    m_zero = float(group.get("motoring_zero_rpm", zero))
+    b_zero = float(group.get("braking_zero_rpm", zero))
+    motoring = float(group["motoring"])
+    braking = float(group["braking"])
+    return TorqueSpeedEnvelopeActuatorCfg(
+        target_names_expr=(joint_name,),
+        stiffness=kp,
+        damping=kd,
+        effort_limit=float(group["effort_limit"]),
+        armature=armature,
+        frictionloss=frictionloss,
+        velocity_limit=R(max(zero, m_zero, b_zero)),
+        forward_motoring_velocity=(0.0, R(plateau), R(m_zero)),
+        forward_motoring_effort=(motoring, motoring, 0.0),
+        reverse_motoring_velocity=(0.0, R(plateau), R(m_zero)),
+        reverse_motoring_effort=(motoring, motoring, 0.0),
+        forward_braking_velocity=(0.0, R(plateau), R(b_zero)),
+        forward_braking_effort=(braking, braking, 0.0),
+        reverse_braking_velocity=(0.0, R(plateau), R(b_zero)),
+        reverse_braking_effort=(braking, braking, 0.0),
+    )
+
+
 def _small_random_quaternions(n: int, max_angle: float, device: str) -> torch.Tensor:
     axis = torch.randn((n, 3), device=device)
     axis = axis / torch.clamp(torch.norm(axis, dim=1, keepdim=True), min=1.0e-6)
@@ -411,25 +472,47 @@ def make_mjlab_ufo_env_cfg(
     armature = actuator_params["armature"]
     friction = actuator_params["friction"]
 
+    # Optional four-quadrant torque-speed envelope for (typically) the leg joints.
+    # Enabled via robot yaml (actuator.envelope.enabled) OR env var UFO_USE_ENVELOPE=1.
+    envelope_root = _envelope_root(robot_training)
+    envelope_enabled = bool(envelope_root.get("enabled", False)) or _env_truthy(os.environ.get("UFO_USE_ENVELOPE"))
+    envelope_groups = dict(envelope_root.get("joints") or {})
+    envelope_curriculum = dict(envelope_root.get("curriculum") or {})
+    envelope_joint_names: list[str] = []
+
     actuators = []
     action_scale = {}
     for i, joint_name in enumerate(dof_names):
         kp = _match_joint_value(joint_name, stiffness)
         kd = _match_joint_value(joint_name, damping)
         effort_limit = effort_limits[i]
-        actuators.append(
-            DcMotorActuatorCfg(
-                target_names_expr=(joint_name,),
-                stiffness=kp,
-                damping=kd,
-                effort_limit=effort_limit,
-                saturation_effort=effort_limit,
-                velocity_limit=velocity_limits[i],
-                armature=armature[i] if i < len(armature) else None,
-                frictionloss=friction[i] if i < len(friction) else None,
+        group = _match_envelope_group(joint_name, envelope_groups) if envelope_enabled else None
+        if group is not None:
+            actuators.append(
+                _build_torque_speed_envelope_cfg(
+                    joint_name, group, kp=kp, kd=kd,
+                    armature=armature[i] if i < len(armature) else None,
+                    frictionloss=friction[i] if i < len(friction) else None,
+                )
             )
-        )
+            envelope_joint_names.append(joint_name)
+        else:
+            actuators.append(
+                DcMotorActuatorCfg(
+                    target_names_expr=(joint_name,),
+                    stiffness=kp,
+                    damping=kd,
+                    effort_limit=effort_limit,
+                    saturation_effort=effort_limit,
+                    velocity_limit=velocity_limits[i],
+                    armature=armature[i] if i < len(armature) else None,
+                    frictionloss=friction[i] if i < len(friction) else None,
+                )
+            )
 
+        # NOTE: action_scale intentionally uses bfm_effort_limits (dof_effort_limit_list),
+        # NOT the envelope effort ceiling, so the beyondmimic action mapping is unchanged
+        # whether or not the envelope is enabled.
         scale = float(config.robot.control.action_scale)
         if bool(config.robot.control.action_rescale):
             if kp <= 0.0:
@@ -439,6 +522,22 @@ def make_mjlab_ufo_env_cfg(
 
     if len(actuators) != len(dof_names):
         raise ValueError(f"Expected one MJLab actuator per UFO dof, got {len(actuators)} for {len(dof_names)} dofs")
+
+    # Stash envelope state so the runtime env (HumanoidVerseMjlabCore) can drive the
+    # optional ideal->real curriculum blend. Harmless no-op when the envelope is disabled.
+    OmegaConf.set_struct(config, False)
+    config.robot.control.envelope_enabled = bool(envelope_enabled and envelope_joint_names)
+    config.robot.control.envelope_warmup_steps = int(envelope_curriculum.get("warmup_steps", 0))
+    config.robot.control.envelope_anneal_steps = int(envelope_curriculum.get("anneal_steps", 0))
+    if envelope_enabled:
+        print(
+            f"[INFO] Torque-speed envelope ENABLED for joints={envelope_joint_names}, "
+            f"curriculum(warmup={config.robot.control.envelope_warmup_steps}, "
+            f"anneal={config.robot.control.envelope_anneal_steps}); "
+            f"action_scale unchanged (uses dof_effort_limit_list).",
+            flush=True,
+        )
+
     scaled_effort_limits = [float(x) * effort_scale for x in bfm_effort_limits]
     if effort_scale != 1.0 and any(abs(a - b) < 1.0e-6 for a, b in zip(effort_limits, scaled_effort_limits)):
         raise ValueError("MJLab actuator effort limits unexpectedly include dof_effort_limit_scale")
@@ -679,6 +778,8 @@ class HumanoidVerseMjlabCore:
         self.torque_limits = torch.tensor(_to_list(hv_config.robot.dof_effort_limit_list), device=self.device, dtype=torch.float32)
         self.dof_vel_limits = torch.tensor(_to_list(hv_config.robot.dof_vel_limit_list), device=self.device, dtype=torch.float32)
 
+        self._init_envelope_curriculum()
+
         self.actions = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
         self.torques = torch.zeros_like(self.actions)
@@ -714,6 +815,40 @@ class HumanoidVerseMjlabCore:
 
         self._refresh_state()
         self.simulator.refresh()
+
+    def _init_envelope_curriculum(self) -> None:
+        """Collect optional torque-speed envelope actuators and set up the blend curriculum."""
+        ctrl = self.config.robot.control
+        self._envelope_enabled = bool(ctrl.get("envelope_enabled", False))
+        self._envelope_warmup_steps = int(ctrl.get("envelope_warmup_steps", 0))
+        self._envelope_anneal_steps = int(ctrl.get("envelope_anneal_steps", 0))
+        self._envelope_step = 0
+        self._envelope_actuators = []
+        if not self._envelope_enabled:
+            return
+        from humanoidverse.utils.actuators.torque_speed_envelope_actuator import TorqueSpeedEnvelopeActuator
+
+        self._envelope_actuators = [a for a in self.robot.actuators if isinstance(a, TorqueSpeedEnvelopeActuator)]
+        # Only drive the blend when a curriculum is requested; otherwise the actuators are
+        # already at the real envelope (alpha=1) straight out of initialize().
+        if self._envelope_actuators and self._envelope_anneal_steps > 0:
+            for actuator in self._envelope_actuators:
+                actuator.set_envelope_blend(0.0)
+
+    def _update_envelope_curriculum(self) -> None:
+        if not self._envelope_actuators or self._envelope_anneal_steps <= 0:
+            return
+        self._envelope_step += 1
+        warmup, anneal = self._envelope_warmup_steps, self._envelope_anneal_steps
+        step = self._envelope_step
+        if step <= warmup:
+            alpha = 0.0
+        elif step >= warmup + anneal:
+            alpha = 1.0
+        else:
+            alpha = (step - warmup) / max(anneal, 1)
+        for actuator in self._envelope_actuators:
+            actuator.set_envelope_blend(alpha)
 
     def _init_reward_scales(self) -> None:
         self.reward_scales = dict(OmegaConf.to_container(self.config.rewards.reward_scales, resolve=True))
@@ -1033,6 +1168,7 @@ class HumanoidVerseMjlabCore:
         self.actions[:] = self._normalized_action(actions)
         mjlab_actions = self._mjlab_action_input()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
+        self._update_envelope_curriculum()
         self._refresh_state()
         reward, aux = self._compute_reward()
         reset = torch.logical_or(terminated.bool(), time_outs.bool())

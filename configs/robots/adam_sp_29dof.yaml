@@ -160,3 +160,28 @@ training:
       right_wrist_yaw_joint:      {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 3.213}
       right_wrist_pitch_joint:    {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
       right_wrist_roll_joint:     {effort_limit: 6.4, velocity_limit: 60.0, armature: 0.01, friction: 0.80325}
+
+    # Optional real-motor four-quadrant torque-speed envelope for the leg joints
+    # (from InstinctMJ feature/jump). When enabled, listed joints use an IdealPD
+    # actuator clipped by measured motoring/braking limits instead of the flat DC
+    # motor clamp; all other joints keep their position actuator. action_scale is
+    # NOT affected (it still uses control.effort_limit above).
+    #   Toggle: set enabled: true here, OR run with env var UFO_USE_ENVELOPE=1.
+    # Group schema (rpm units, effort Nm):
+    #   effort_limit  = forcerange ceiling (also the flat clamp at curriculum alpha=0)
+    #   plateau_rpm   = |speed| where the flat torque plateau ends
+    #   zero_rpm      = no-load speed (velocity_limit); torque decays to 0 here
+    #   motoring/braking = plateau torque for driving / braking quadrants
+    #   [motoring_zero_rpm]/[braking_zero_rpm] = per-quadrant no-load speed override
+    # curriculum: warmup_steps/anneal_steps in control-steps; 0/0 => real envelope
+    #   active immediately (no ideal->real annealing).
+    envelope:
+      enabled: false
+      curriculum: {warmup_steps: 0, anneal_steps: 0}
+      joints:
+        hip_pitch:   {effort_limit: 130.0, plateau_rpm: 172.0, zero_rpm: 267.0, motoring: 100.0, braking: 120.0}
+        knee:        {effort_limit: 210.0, plateau_rpm: 172.0, zero_rpm: 267.0, motoring: 150.0, braking: 200.0}
+        hip_roll:    {effort_limit: 150.0, plateau_rpm: 115.0, zero_rpm: 172.0, motoring: 100.0, braking: 140.0}
+        hip_yaw:     {effort_limit: 80.0,  plateau_rpm: 153.0, zero_rpm: 210.0, motoring: 45.0,  braking: 70.0}
+        ankle_pitch: {effort_limit: 130.0, plateau_rpm: 115.0, zero_rpm: 229.0, motoring: 70.0,  braking: 120.0, motoring_zero_rpm: 210.0, braking_zero_rpm: 229.0}
+        ankle_roll:  {effort_limit: 60.0,  plateau_rpm: 76.0,  zero_rpm: 172.0, motoring: 30.0,  braking: 55.0}

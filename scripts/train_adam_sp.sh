@@ -32,7 +32,15 @@ BUFFER_SIZE="${BUFFER_SIZE:-5120000}"
 UPDATE_Z_EVERY="${UPDATE_Z_EVERY:-100}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-ufo_fb_adam_sp}"
 USE_WANDB="${USE_WANDB:-false}"
+# Optional: real-motor four-quadrant torque-speed envelope on the leg joints.
+# 'false' (default) uses the plain DC-motor actuators. Set to 'true' to enable
+# without editing the robot YAML.
+USE_ENVELOPE="${USE_ENVELOPE:-false}"
 # ----------------------------------------
+
+if [ "$USE_ENVELOPE" = "true" ]; then
+  export UFO_USE_ENVELOPE=1
+fi
 
 cd "$PROJECT_DIR"
 
@@ -121,6 +129,7 @@ Environment variables (for 'train' mode):
   WORK_DIR           runs/ufo_adam_sp (default)
   DATA_PATH          humanoidverse/data/adam_sp_lafan_29dof_10s-clipped.pkl (default, joint-limit-clamped)
   USE_WANDB          false (default) — set to 'true' to enable
+  USE_ENVELOPE       false (default) — 'true' enables leg torque-speed envelope
   WANDB_RUN_NAME     ufo_fb_adam_sp (default)
 
 Examples:
