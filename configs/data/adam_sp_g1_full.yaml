@@ -1,0 +1,8 @@
+robot_config: configs/robots/adam_sp_29dof.yaml
+datasets:
+  - name: adam_sp_g1_full
+    format: ufo_pkl
+    train_path: cache/motion_data/adam_sp_g1_full_xlab/adam_sp_g1_full_10s_ufo.pkl
+    inference_path: cache/motion_data/adam_sp_g1_full_xlab/adam_sp_g1_full_10s_ufo.pkl
+    weight: 1.0
+    fps: 30.0

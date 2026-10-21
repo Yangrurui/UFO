@@ -4,6 +4,8 @@
 #   - reward_base
 
 rewards:
+  # Opt-in substep actual torque cost and normalized raw-demand clipping cost.
+  torque_reward_mode: legacy
   set_reward: Zhengyi
   set_reward_date: 20250320
   only_positive_rewards: False

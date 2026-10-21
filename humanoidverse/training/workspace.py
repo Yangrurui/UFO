@@ -43,7 +43,7 @@ from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
-from humanoidverse.distributed import average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
+from humanoidverse.distributed import agent_optimizers, average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
 
 TRAIN_LOG_FILENAME = "train_log.txt"
 REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
@@ -92,6 +92,31 @@ def _accumulate_metrics(
             total_metrics[key] = value.clone()
         metric_update_counts[key] = metric_update_counts.get(key, 0) + 1
     return total_metrics, metric_update_counts
+
+
+def _restore_adam_step_devices(agent: tp.Any) -> int:
+    """Undo checkpoint map_location for Adam's host-side counters after broadcast.
+
+    Non-capturable, non-fused Adam reads these scalar counters with .item().
+    Leaving them on CUDA after resume adds a device synchronization per read.
+    Moments stay on their existing devices, and fresh/unused state stays empty.
+    """
+    if os.environ.get("UFO_CPU_OPTIMIZER_STEPS", "1") == "0":
+        return 0
+    restored = 0
+    for optimizer in agent_optimizers(agent):
+        if not isinstance(optimizer, torch.optim.Adam):
+            continue
+        for group in optimizer.param_groups:
+            if group.get("capturable", False) or group.get("fused", False):
+                continue
+            for parameter in group["params"]:
+                state = optimizer.state.get(parameter)
+                step = state.get("step") if state else None
+                if torch.is_tensor(step) and step.device.type != "cpu":
+                    state["step"] = step.cpu()
+                    restored += 1
+    return restored
 
 
 class TrainConfig(BaseConfig):
@@ -455,8 +480,20 @@ class Workspace:
         self._checkpoint_local_time = int(self._checkpoint_status["local_time"])
         self._checkpoint_global_time = int(self._checkpoint_status["global_time"])
         self._optimizer_steps = int(self._checkpoint_status["optimizer_steps"])
+        fused_adam = os.environ.get("UFO_FUSED_ADAM")
+        if fused_adam is not None:
+            if fused_adam not in ("0", "1"):
+                raise ValueError("UFO_FUSED_ADAM must be 0 or 1")
+            from humanoidverse.optimizer_runtime import configure_fused_adam
+            optimizer_runtime = configure_fused_adam(self.agent, enabled=fused_adam == "1")
+            print(f"[INFO] Rank {self.distributed_rank}: fused Adam={fused_adam}: {optimizer_runtime}", flush=True)
         if self.cfg.distributed_sync:
             broadcast_agent_state(self.agent, src=0)
+        # NCCL first broadcasts the loaded CUDA optimizer state. Only then put
+        # ordinary Adam's step counters back on CPU; moments remain on CUDA.
+        restored_steps = _restore_adam_step_devices(self.agent)
+        if restored_steps:
+            print(f"[INFO] Rank {self.distributed_rank}: restored {restored_steps} Adam step counters to CPU", flush=True)
         self.agent._model.train()
 
         if isinstance(self.cfg.evaluations, list):
@@ -593,6 +630,19 @@ class Workspace:
                 )
             else:
                 replay_buffer["train"] = DictBuffer(capacity=self.cfg.buffer_size, device=self.cfg.buffer_device)
+        update_seed_steps = self.cfg.num_seed_steps
+        if self._checkpoint_local_time > 0 and len(replay_buffer["train"]) == 0:
+            # Restored counters do not imply restored experience. Warm up the
+            # new replay while keeping the original policy/random-action gate.
+            update_seed_steps += self._checkpoint_local_time
+            print(
+                f"[INFO] Rank {self.distributed_rank}: empty replay after checkpoint resume; "
+                f"checkpoint_local_time={self._checkpoint_local_time}, "
+                f"replay_warmup_local_samples={self.cfg.num_seed_steps}, "
+                f"optimizer_updates_require_local_time>{update_seed_steps}; "
+                f"random_action_seed_steps_local={self.cfg.num_seed_steps} (unchanged)",
+                flush=True,
+            )
         if self.training_with_expert_data:
             replay_buffer["expert_slicer"] = expert_buffer
 
@@ -648,6 +698,8 @@ class Workspace:
             eval_instances.append(isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation))
         uses_humanoidverse_eval = True if any(eval_instances) else False
 
+        completed_local_time = self._checkpoint_local_time
+        completed_global_time = self._checkpoint_global_time
         for local_time in range(self._checkpoint_local_time, max_local_time + local_step_increment, local_step_increment):
             global_time = local_time * global_step_scale
             if global_time > self.cfg.num_env_steps:
@@ -920,7 +972,7 @@ class Workspace:
                 )
             replay_buffer["train"].extend(data)
 
-            if len(replay_buffer["train"]) > 0 and local_time > self.cfg.num_seed_steps and update_agent_time_checker.check(local_time):
+            if len(replay_buffer["train"]) > 0 and local_time > update_seed_steps and update_agent_time_checker.check(local_time):
                 update_agent_time_checker.update_last_step(local_time)
                 for _ in range(self.cfg.num_agent_updates):
                     metrics = self.agent.update(replay_buffer, local_time)
@@ -998,6 +1050,21 @@ class Workspace:
             truncated = new_truncated
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
+            completed_local_time = next_local_time
+            completed_global_time = next_global_time
+
+        # Budget exhaustion can fall between periodic checkpoints (including a
+        # partial final batch that we cannot collect without exceeding budget).
+        # Save only fully completed iterations, and do not rewrite a checkpoint
+        # already saved at this step. This is deliberately outside a finally:
+        # failed rollouts/updates must not replace the last valid checkpoint.
+        if completed_global_time > checkpoint_time_checker.last_step:
+            self.save(
+                local_time=completed_local_time,
+                global_time=completed_global_time,
+                optimizer_steps=self._optimizer_steps,
+                replay_buffer=replay_buffer,
+            )
         train_env.close()
 
     def eval(self, t, replay_buffer):

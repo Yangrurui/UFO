@@ -406,7 +406,14 @@ class FBAgent:
         optimizers = torch.load(str(path / "optimizers.pth"), weights_only=True, map_location=device)
         for k, v in optimizers.items():
             getattr(agent, k).load_state_dict(v)
-        safetensors.torch.load_model(agent._model, path / "model/model.safetensors", device=device, strict=False)
+        # Unlike torch, safetensors resolves the unindexed "cuda" to GPU 0.
+        # Keep the model's device type for autocast, but load onto this rank's GPU.
+        tensor_device = device
+        if device is not None:
+            parsed_device = torch.device(device)
+            if parsed_device.type == "cuda" and parsed_device.index is None:
+                tensor_device = f"cuda:{torch.cuda.current_device()}"
+        safetensors.torch.load_model(agent._model, path / "model/model.safetensors", device=tensor_device, strict=False)
         agent._model.train()
         agent._model.requires_grad_(True)
         return agent

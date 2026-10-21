@@ -26,6 +26,8 @@
 
 UFO is a source-available research framework for humanoid control. The `main` branch focuses on MJLab training, robot-aware motion-data import, tracking/goal/reward inference, and ONNX export. The most complete and best-tested path is currently Unitree G1.
 
+This workspace also contains an [Adam SP adaptation](docs/ADAM_SP.md) using XLab's measured motor envelopes and command delays, with the same 862 motion windows as G1. Its data and training interfaces are validated; long-run policy performance is still being trained and evaluated.
+
 UFO is designed to separate the learning pipeline from robot-specific configuration where practical, but new robot bring-up is still experimental. A new robot requires a MuJoCo XML, optionally a matching URDF, and motion data that has already been adapted or retargeted to that robot in RobotState format. UFO does not automatically retarget human motion or another robot's motion to a new robot, and one checkpoint cannot be directly reused across robots with different bodies, actions, or observation dimensions.
 
 ## What is supported?
@@ -128,7 +130,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --buffer-size 5120000
 ```
 
-### 4. TeCH training on G1
+### 4. TeCH Training on G1
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \

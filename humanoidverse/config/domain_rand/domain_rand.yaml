@@ -18,6 +18,7 @@ domain_rand:
   # link mass
   randomize_link_mass : True
   link_mass_range : [0.95, 1.05]
+  randomize_link_inertia_with_mass: False
 
   # pd gain
   randomize_pd_gain : False
@@ -27,6 +28,10 @@ domain_rand:
   # friction
   randomize_friction : True
   friction_range : [0.5, 1.25]
+  friction_shared_random: False
+  # Let the robot coefficient determine robot/ground contact friction. Otherwise
+  # the default ground coefficient of 1 masks samples below 1 under max mixing.
+  friction_robot_controls_ground: False
 
   # base mass
   randomize_base_mass : False
@@ -41,6 +46,17 @@ domain_rand:
   # control delay
   randomize_ctrl_delay : False
   ctrl_delay_step_range : [0, 1] # integer max real delay is 90ms
+  # Shared policy-computation delay, separate from grouped actuator delay.
+  inference_delay_range_ms: [0.0, 0.0]
+
+  # Bounded perturbations around a sampled reference state, not sensor noise.
+  randomize_reference_reset: False
+  reference_reset:
+    joint_position_half_range: 0.05
+    root_position_half_range: [0.025, 0.025, 0.005]
+    root_rotation_half_range: [0.05, 0.05, 0.1]
+    root_linear_velocity_half_range: [0.25, 0.25, 0.1]
+    root_angular_velocity_half_range: [0.26, 0.26, 0.39]
 
   # Mimicing BeyondMimic: https://github.com/HybridRobotics/whole_body_tracking/blob/dcecabd8c24c68f59d143fdf8e3a670f420c972d/source/whole_body_tracking/whole_body_tracking/tasks/tracking/tracking_env_cfg.py#L170
   randomize_default_dof_pos : True

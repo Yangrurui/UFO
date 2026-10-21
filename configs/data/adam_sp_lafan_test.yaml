@@ -1,0 +1,12 @@
+robot_config: configs/robots/adam_sp_29dof.yaml
+datasets:
+- name: adam_sp_lafan_test
+  format: robot_state_npz
+  source_path: ../adam_sp/accepted/test/*.npz
+  weight: 1.0
+  auto_build:
+    train_clip_seconds: 10.0
+    clip_stride_seconds: 10.0
+    keep_short: true
+    min_clip_seconds: 1.0
+  fps: 30.0

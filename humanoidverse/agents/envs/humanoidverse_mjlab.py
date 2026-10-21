@@ -21,7 +21,7 @@ import pydantic
 import torch
 from gymnasium import Env
 from gymnasium.vector import VectorEnv
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.base import BaseConfig
@@ -165,7 +165,7 @@ def _joint_limits_from_robot_training(robot_training: dict[str, Any], dof_names:
     return lower, upper
 
 
-def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | None) -> None:
+def _apply_robot_training_config(config, robot_training: dict[str, Any] | None) -> None:
     if not robot_training:
         return
     robot_info = dict(robot_training["robot"])
@@ -208,6 +208,13 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
     config.robot.control.action_scale = float(robot_training["action_scale"])
     config.robot.control.action_clip_value = float(robot_training["action_clip_value"])
     config.robot.control.normalize_action_to = float(robot_training["normalize_action_to"])
+    scales = robot_training.get("actuator", {}).get("action_scales")
+    if scales:
+        if set(scales) != set(dof_names):
+            raise ValueError("Explicit actuator action_scales must cover every control joint exactly")
+        config.robot.control.action_scales = dict(scales)
+    target_ranges = robot_training.get("actuator", {}).get("action_target_ranges")
+    config.robot.control.action_target_ranges = dict(target_ranges) if target_ranges is not None else None
 
     xml_path = Path(robot_info["xml_path"]).expanduser().resolve()
     if config.robot.get("asset") is None:
@@ -270,6 +277,7 @@ def _action_target_scale(config) -> torch.Tensor:
     # not do it either.
     effort_limits = [float(x) for x in _to_list(config.robot.dof_effort_limit_list)]
     scales = []
+    explicit_scales = dict(config.robot.control.get("action_scales", {}))
     for i, joint_name in enumerate(dof_names):
         kp = _match_joint_value(joint_name, stiffness)
         scale = float(config.robot.control.action_scale)
@@ -277,8 +285,46 @@ def _action_target_scale(config) -> torch.Tensor:
             if kp <= 0.0:
                 raise ValueError(f"Cannot action_rescale joint {joint_name}: stiffness={kp}")
             scale *= effort_limits[i] / kp
-        scales.append(scale)
+        scales.append(float(explicit_scales.get(joint_name, scale)))
     return torch.tensor(scales, dtype=torch.float32)
+
+
+def _action_target_ranges(config) -> torch.Tensor | None:
+    """Optional PD-command bounds, independent of gains, effort and armature."""
+    ranges = config.robot.control.get("action_target_ranges")
+    if ranges is None:
+        return None
+    names = tuple(_to_list(config.robot.dof_names))
+    if set(ranges) != set(names):
+        raise ValueError("action_target_ranges must cover every control joint exactly")
+    values = []
+    for name in names:
+        pair = ranges[name]
+        if not isinstance(pair, (list, tuple, ListConfig)) or len(pair) != 2:
+            raise ValueError(f"action_target_ranges.{name} must contain [lower, upper]")
+        values.append([float(value) for value in pair])
+    bounds = torch.tensor(values, dtype=torch.float32)
+    if not bool(torch.isfinite(bounds).all()) or bool((bounds[:, 0] >= bounds[:, 1]).any()):
+        raise ValueError("action_target_ranges must have finite, strictly increasing bounds")
+    lower = torch.tensor(_to_list(config.robot.dof_pos_lower_limit_list), dtype=torch.float32)
+    upper = torch.tensor(_to_list(config.robot.dof_pos_upper_limit_list), dtype=torch.float32)
+    if bool((bounds[:, 0] < lower - 1e-6).any()) or bool((bounds[:, 1] > upper + 1e-6).any()):
+        raise ValueError("action_target_ranges must remain inside physical joint limits")
+    default = _default_joint_pos(config)
+    if bool(((default < bounds[:, 0]) | (default > bounds[:, 1])).any()):
+        raise ValueError("action_target_ranges must contain each default joint position")
+    return bounds
+
+
+def _asymmetric_joint_position_targets(
+    normalized_actions: torch.Tensor, center: torch.Tensor, target_ranges: torch.Tensor
+) -> torch.Tensor:
+    """Map [-1, 1] around the (possibly randomized) zero-action pose."""
+    lower, upper = target_ranges[:, 0], target_ranges[:, 1]
+    center = torch.clamp(center, min=lower, max=upper)
+    action = normalized_actions.clamp(-1.0, 1.0)
+    excursion = torch.where(action < 0, center - lower, upper - center)
+    return torch.clamp(center + action * excursion, min=lower, max=upper)
 
 
 def _small_random_quaternions(n: int, max_angle: float, device: str) -> torch.Tensor:
@@ -314,7 +360,7 @@ def _compose_humanoidverse_config(
     cfg.exp_base = "__no_exp_base__"
     cfg.env.config.headless = True
     OmegaConf.set_struct(cfg, False)
-    _patch_humanoidverse_robot_config(cfg, robot_training)
+    _apply_robot_training_config(cfg, robot_training)
     cfg.robot.asset.asset_root = _resolve_humanoidverse_path(cfg.robot.asset.asset_root)
     cfg.robot.motion.asset.assetRoot = _resolve_humanoidverse_path(cfg.robot.motion.asset.assetRoot)
     cfg.robot.motion.motion_file = lafan_tail_path
@@ -339,6 +385,11 @@ def _compose_humanoidverse_config(
         cfg.domain_rand.randomize_push_robots = False
         cfg.domain_rand.push_robots = False
         cfg.domain_rand.randomize_default_dof_pos = False
+        cfg.domain_rand.randomize_link_inertia_with_mass = False
+        cfg.domain_rand.friction_robot_controls_ground = False
+        cfg.domain_rand.friction_shared_random = False
+        cfg.domain_rand.randomize_reference_reset = False
+        cfg.domain_rand.inference_delay_range_ms = [0.0, 0.0]
 
     assert cfg.env.config.termination.terminate_when_close_to_dof_pos_limit is False
     assert cfg.env.config.termination.terminate_when_close_to_dof_vel_limit is False
@@ -377,12 +428,15 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
+    from mjlab.managers.metrics_manager import MetricsTermCfg
+    from humanoidverse.agents.envs.torque_rewards import TorqueRewardCollector, torque_reward_mode
     from mjlab.managers.scene_entity_config import SceneEntityCfg
     from mjlab.managers.termination_manager import TerminationTermCfg
     from mjlab.scene import SceneCfg
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
     from mjlab.terrains import TerrainEntityCfg
+    from mjlab.utils.spec_config import CollisionCfg
 
     dof_names = tuple(_to_list(config.robot.dof_names))
     body_names = tuple(_to_list(config.robot.body_names))
@@ -435,10 +489,21 @@ def make_mjlab_ufo_env_cfg(
             if kp <= 0.0:
                 raise ValueError(f"Cannot action_rescale joint {joint_name}: stiffness={kp}")
             scale *= bfm_effort_limits[i] / kp
-        action_scale[joint_name] = scale
+        action_scale[joint_name] = float(config.robot.control.get("action_scales", {}).get(joint_name, scale))
 
-    if len(actuators) != len(dof_names):
-        raise ValueError(f"Expected one MJLab actuator per UFO dof, got {len(actuators)} for {len(dof_names)} dofs")
+    grouped = (robot_training or {}).get("actuator", {}).get("groups")
+    if grouped:
+        from humanoidverse.agents.envs.actuators.config import build_grouped_actuators
+        actuators = build_grouped_actuators(
+            grouped, dof_names,
+            enable_delay=bool(config.domain_rand.get("randomize_ctrl_delay", False)),
+            delay_step_range=tuple(config.domain_rand.ctrl_delay_step_range),
+            physics_dt=1.0 / float(config.simulator.config.sim.fps),
+        )
+
+    covered = [name for actuator in actuators for name in actuator.target_names_expr]
+    if len(covered) != len(dof_names) or set(covered) != set(dof_names):
+        raise ValueError("MJLab actuator groups must cover each control joint exactly once")
     scaled_effort_limits = [float(x) * effort_scale for x in bfm_effort_limits]
     if effort_scale != 1.0 and any(abs(a - b) < 1.0e-6 for a, b in zip(effort_limits, scaled_effort_limits)):
         raise ValueError("MJLab actuator effort limits unexpectedly include dof_effort_limit_scale")
@@ -470,7 +535,10 @@ def make_mjlab_ufo_env_cfg(
         spec_fn=spec_fn,
         init_state=init_state,
         articulation=EntityArticulationInfoCfg(actuators=tuple(actuators), soft_joint_pos_limit_factor=1.0),
-        sort_actuators=True,
+        # BuiltinPd uses [all position channels, all velocity channels] per
+        # group. MJLab's per-joint sorting interleaves these channels instead.
+        # Action/joint names below already provide the explicit UFO ordering.
+        sort_actuators=not bool(grouped),
     )
     sensors = (
         ContactSensorCfg(
@@ -488,15 +556,26 @@ def make_mjlab_ufo_env_cfg(
             enable_corruption=False,
         )
     }
+    inference_delay_range = tuple(float(x) for x in config.domain_rand.get("inference_delay_range_ms", (0.0, 0.0)))
+    action_cfg_type = JointPositionActionCfg
+    action_extra = {}
+    if inference_delay_range != (0.0, 0.0):
+        from humanoidverse.agents.envs.inference_delay import DelayedJointPositionActionCfg
+        action_cfg_type = DelayedJointPositionActionCfg
+        action_extra["inference_delay_range_ms"] = inference_delay_range
     actions = {
-        "actions": JointPositionActionCfg(
+        "actions": action_cfg_type(
             entity_name="robot",
             actuator_names=dof_names,
             preserve_order=True,
             scale=action_scale,
             use_default_offset=True,
+            **action_extra,
         )
     }
+    metrics = {}
+    if torque_reward_mode(config) == "dynamic_substep":
+        metrics["torque_saturation"] = MetricsTermCfg(func=TorqueRewardCollector, per_substep=True)
     reward_keys = tuple(config.rewards.reward_scales.keys())
     rewards = {key: RewardTermCfg(func=_zero_reward, weight=0.0) for key in reward_keys}
     terminations = {
@@ -541,12 +620,16 @@ def make_mjlab_ufo_env_cfg(
             },
         )
     if bool(domain_rand.get("randomize_link_mass", False)):
+        mass_func = mjlab_dr.body_mass
+        if bool(domain_rand.get("randomize_link_inertia_with_mass", False)):
+            from humanoidverse.agents.envs.adam_randomization import randomize_mass_and_inertia
+            mass_func = randomize_mass_and_inertia
         events["random_link_mass"] = EventTermCfg(
             mode="startup",
-            func=mjlab_dr.body_mass,
+            func=mass_func,
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "operation": "scale",
+                **({"operation": "scale"} if mass_func is mjlab_dr.body_mass else {}),
                 "ranges": tuple(float(x) for x in _to_list(domain_rand.link_mass_range)),
             },
         )
@@ -559,21 +642,42 @@ def make_mjlab_ufo_env_cfg(
                 "operation": "abs",
                 "axes": [0],
                 "ranges": tuple(float(x) for x in _to_list(domain_rand.friction_range)),
+                "shared_random": bool(domain_rand.get("friction_shared_random", False)),
             },
         )
+
+    if grouped and bool(domain_rand.get("randomize_pd_gain", False)):
+        events["random_pd_gains"] = EventTermCfg(
+            mode="startup", func=mjlab_dr.pd_gains,
+            params={"asset_cfg": SceneEntityCfg("robot"), "operation": "scale",
+                    "kp_range": tuple(float(x) for x in domain_rand.kp_range),
+                    "kd_range": tuple(float(x) for x in domain_rand.kd_range)},
+        )
+
+    terrain_collisions = ()
+    if bool(domain_rand.get("friction_robot_controls_ground", False)):
+        # Keep contact priority/solver parameters unchanged; only remove the
+        # ground's sliding-friction floor from MuJoCo's max mixing rule.
+        terrain_collisions = (CollisionCfg(
+            geom_names_expr=("terrain",), friction=(0.0, 0.005, 0.0001),
+            disable_other_geoms=False,
+        ),)
 
     return ManagerBasedRlEnvCfg(
         decimation=int(config.simulator.config.sim.control_decimation),
         scene=SceneCfg(
             num_envs=num_envs,
             env_spacing=float(config.env_spacing),
-            terrain=TerrainEntityCfg(terrain_type="plane", env_spacing=float(config.env_spacing)),
+            terrain=TerrainEntityCfg(
+                terrain_type="plane", env_spacing=float(config.env_spacing), collisions=terrain_collisions,
+            ),
             entities={"robot": robot_cfg},
             sensors=sensors,
         ),
         observations=observations,
         actions=actions,
         rewards=rewards,
+        metrics=metrics,
         terminations=terminations,
         events=events,
         seed=seed,
@@ -623,6 +727,7 @@ class HumanoidVerseMjlabCore:
         self.robot = mjlab_env.scene["robot"]
         self.device = str(mjlab_env.device)
         self.num_envs = int(mjlab_env.num_envs)
+        self._torque_rewards = getattr(mjlab_env, "_ufo_torque_rewards", None)
         self.dt = float(mjlab_env.step_dt)
         self.sim_dt = float(mjlab_env.physics_dt)
         self._creation_config = creation_config
@@ -666,6 +771,8 @@ class HumanoidVerseMjlabCore:
         self.default_dof_pos = _default_joint_pos(hv_config).to(self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.default_dof_pos_offset = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.action_target_scale = _action_target_scale(hv_config).to(self.device).unsqueeze(0)
+        target_ranges = _action_target_ranges(hv_config)
+        self.action_target_ranges = target_ranges.to(self.device) if target_ranges is not None else None
         self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         self.forward_vec = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
 
@@ -681,6 +788,7 @@ class HumanoidVerseMjlabCore:
 
         self.actions = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
+        self._inference_delay_action = action_term if hasattr(action_term, "reset_inference_delay") else None
         self.torques = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros_like(self.actions)
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -714,6 +822,10 @@ class HumanoidVerseMjlabCore:
 
         self._refresh_state()
         self.simulator.refresh()
+
+        if self._inference_delay_action is not None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            self._reset_inference_delay(env_ids, self.dof_pos)
 
     def _init_reward_scales(self) -> None:
         self.reward_scales = dict(OmegaConf.to_container(self.config.rewards.reward_scales, resolve=True))
@@ -979,6 +1091,9 @@ class HumanoidVerseMjlabCore:
         aux["limits_dof_vel"] = torch.sum((torch.abs(self.dof_vel) - vel_limit).clip(min=0.0, max=1.0), dim=1)
         torque_limit = self.torque_limits * float(self.config.rewards.reward_limit.soft_torque_limit)
         aux["limits_torque"] = torch.sum((torch.abs(self.torques) - torque_limit).clip(min=0.0), dim=1)
+        if self._torque_rewards is not None:
+            aux["penalty_torques"] = self._torque_rewards.values[:, 0]
+            aux["limits_torque"] = self._torque_rewards.values[:, 1]
         if len(self.penalised_contact_indices) > 0:
             undesired = torch.any(torch.abs(contact[:, self.penalised_contact_indices, :]) > 1.0, dim=(1, 2))
         else:
@@ -1022,6 +1137,19 @@ class HumanoidVerseMjlabCore:
 
     def _mjlab_action_input(self) -> torch.Tensor:
         action_indices = self._action_term_dof_indices
+        target_ranges = getattr(self, "action_target_ranges", None)
+        if target_ranges is not None:
+            normalized_actions = self.actions / float(self.config.robot.control.action_clip_value)
+            targets = _asymmetric_joint_position_targets(
+                normalized_actions, self.default_dof_pos + self.default_dof_pos_offset, target_ranges
+            )
+            # JointPositionAction still applies its original scale and default
+            # offset. Invert that transform so it receives the desired target.
+            # Policy/replay actions and action-history observations stay in
+            # their existing domains; only the actuator input is transformed.
+            return (targets[:, action_indices] - self.default_dof_pos[:, action_indices]) / torch.clamp(
+                self.action_target_scale[:, action_indices], min=1.0e-6
+            )
         return self.actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
             self.action_target_scale[:, action_indices], min=1.0e-6
         )
@@ -1032,7 +1160,11 @@ class HumanoidVerseMjlabCore:
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
         mjlab_actions = self._mjlab_action_input()
+        if self._torque_rewards is not None:
+            self._torque_rewards.begin_step()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
+        if self._torque_rewards is not None:
+            self._torque_rewards.finish_step()
         self._refresh_state()
         reward, aux = self._compute_reward()
         reset = torch.logical_or(terminated.bool(), time_outs.bool())
@@ -1062,6 +1194,15 @@ class HumanoidVerseMjlabCore:
         env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
         self.reset_idx(env_ids, target_states=target_states)
         return None, {}
+
+    def _reset_inference_delay(self, env_ids: torch.Tensor, joint_pos: torch.Tensor) -> None:
+        """Hold the reset pose until the first computed command has arrived."""
+        order = self._action_term_dof_indices
+        self._inference_delay_action.reset_inference_delay(env_ids, joint_pos[:, order])
+        # Native reset has already written zero actuator targets once. Clear
+        # that history and start the motor command channel from the held pose.
+        self.robot.reset(env_ids)
+        self.robot.set_joint_position_target(joint_pos, joint_ids=self._joint_ids, env_ids=env_ids[:, None])
 
     def reset_idx(self, env_ids: torch.Tensor, target_states: dict[str, torch.Tensor] | None = None) -> None:
         if len(env_ids) == 0:
@@ -1116,9 +1257,20 @@ class HumanoidVerseMjlabCore:
                 self.config.noise_to_initial_level
             )
 
+            if not self.is_evaluating and bool(self.config.domain_rand.get("randomize_reference_reset", False)):
+                from humanoidverse.agents.envs.adam_randomization import perturb_reference_state
+                reset_ranges = OmegaConf.to_container(self.config.domain_rand.reference_reset, resolve=True)
+                root_xyzw, joint_state = perturb_reference_state(
+                    root_xyzw, torch.stack((joint_pos, joint_vel), dim=-1),
+                    self.hard_dof_pos_limits, **reset_ranges,
+                )
+                joint_pos, joint_vel = joint_state.unbind(dim=-1)
+
         root_wxyz = torch.cat([root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]], dim=-1)
         self.robot.write_root_state_to_sim(root_wxyz, env_ids=env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=self._joint_ids, env_ids=env_ids)
+        if self._inference_delay_action is not None:
+            self._reset_inference_delay(env_ids, joint_pos)
         self.mjlab_env.scene.write_data_to_sim()
         self.mjlab_env.sim.forward()
         self.mjlab_env._manual_reset_pending[env_ids] = False

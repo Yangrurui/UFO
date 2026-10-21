@@ -2,6 +2,8 @@
 
 Policy rollout is rendered from the training environment, while the reference
 motion is rendered from the configured robot MJCF with pure MuJoCo qpos playback.
+Policy ONNX outputs remain raw actions; tracking .meta.json describes optional
+joint-target mapping. Bare goal/reward exports require this mapping externally.
 """
 
 from __future__ import annotations
@@ -98,6 +100,49 @@ def _tracking_z(model: torch.nn.Module, obs: Any) -> torch.Tensor:
     return model.project_z(z)
 
 
+def _action_mapping_metadata(robot_training: Any) -> dict[str, Any] | None:
+    actuator = getattr(robot_training, "actuator", {})
+    ranges = actuator.get("action_target_ranges")
+    if ranges is None:
+        return None
+    from humanoidverse.agents.envs.humanoidverse_mjlab import _match_joint_value
+
+    names = list(robot_training.robot.control_joint_names)
+    gains = {
+        name: {
+            "kp": _match_joint_value(name, robot_training.stiffness),
+            "kd": _match_joint_value(name, robot_training.damping),
+        }
+        for name in names
+    }
+    # Grouped actuators can override control gains; describe the actual nominal
+    # hardware configuration, before training-time gain randomization.
+    for group in actuator.get("groups", []):
+        parameters = group["parameters"]
+        for name in group["joints"]:
+            for source, destination in (("stiffness", "kp"), ("damping", "kd")):
+                if source in parameters:
+                    gains[name][destination] = float(parameters[source])
+    return {
+        "type": "asymmetric_joint_position",
+        "joint_order": names,
+        "position_units": "rad",
+        "onnx_output": "raw_policy_action",
+        "raw_action_bounds": [-1.0, 1.0],
+        "raw_to_native_scale": float(robot_training.normalize_action_to),
+        "native_action_clip": float(robot_training.action_clip_value),
+        "target_ranges": {name: list(ranges[name]) for name in names},
+        "default_joint_angles": {name: float(robot_training.default_joint_angles[name]) for name in names},
+        "center_formula": "center = clamp(default_joint_angles + default_dof_pos_offset, lower, upper)",
+        "normalized_action_formula": "u = clamp(raw_action * raw_to_native_scale / native_action_clip, -1, 1)",
+        "target_formula": "qPD = center + where(u >= 0, u * (upper - center), u * (center - lower))",
+        "default_offset_note": "Use zero default_dof_pos_offset when pose randomization is disabled. Apply it once, inside center.",
+        "action_history_note": "last_action/history use clipped native actions; replay action and ONNX output use raw policy actions.",
+        "nominal_pd_gains": gains,
+        "pd_gain_note": "Nominal gains before domain randomization; physical effort/speed limits and delays remain separate actuator settings.",
+    }
+
+
 def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_training: Any) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_name = model.__class__.__name__
@@ -124,6 +169,9 @@ def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_trainin
             "control_joint_names": control_joint_names,
         }
     )
+    action_mapping = _action_mapping_metadata(robot_training)
+    if action_mapping is not None:
+        export_metadata["action_mapping"] = action_mapping
     metadata_path = output_dir / f"{model_name}.meta.json"
     metadata_path.write_text(json.dumps(export_metadata, indent=2, sort_keys=True) + "\n")
     print(f"[INFO] Exported model to {output_dir / output_name}")

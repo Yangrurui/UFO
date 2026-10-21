@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 Device = Union[str, torch.device]
+_HDF5_LOAD_CHUNK_BYTES = 16 * 1024 * 1024
 
 
 @functools.singledispatch
@@ -152,46 +153,41 @@ class DictBuffer:
 
     def load_hdf5(self, h5_file: str | Path, nested_key_separator: str | None = None) -> None:
         nested_key_separator = nested_key_separator or self.nested_key_separator
-        hf = h5py.File(str(h5_file), "r")
         storage = {}
         storage_size_in_h5 = None
-        for k, v in hf.items():
-            splits = k.split(nested_key_separator)
-            current_dict = storage
-            for i in range(len(splits) - 1):
-                key = splits[i]
-                if key not in current_dict:
-                    current_dict[key] = {}
-                current_dict = current_dict[key]
-
-            storage_tensor = _to_torch(v[:], device=self.device)
-            if storage_tensor.shape[0] < self.capacity:
-                # If the shape is smaller than capacity, we need to pad it
-                storage_tensor = torch.cat(
-                    [
-                        storage_tensor,
-                        torch.zeros(
-                            (self.capacity - storage_tensor.shape[0], *storage_tensor.shape[1:]),
-                            device=self.device,
-                            dtype=storage_tensor.dtype,
-                        ),
-                    ]
+        with h5py.File(str(h5_file), "r") as hf:
+            for k, v in hf.items():
+                assert v.ndim > self._ndim(), (
+                    f"Data shape {v.shape} has less than {self._ndim()} dimensions. Seems like the saved buffer is corrupted"
                 )
-            assert storage_tensor.shape[0] == self.capacity, (
-                f"Data shape {storage_tensor.shape} is larger than buffer capacity {self.capacity}. Seems like the saved buffer is corrupted"
-            )
-            assert storage_tensor.ndim > self._ndim(), (
-                f"Data shape {storage_tensor.shape} has less than {self._ndim()} dimensions. Seems like the saved buffer is corrupted"
-            )
-            current_dict[splits[-1]] = storage_tensor
-
-            if storage_size_in_h5 is None:
-                storage_size_in_h5 = v.shape[0]
-            else:
-                assert storage_size_in_h5 == v.shape[0], (
-                    f"Batch dimension 0 is {v.shape[0]} for hdf5 entry {k} and it is different from the first shape {storage_size_in_h5}. Seems like the saved buffer is corrupted"
+                assert v.shape[0] <= self.capacity, (
+                    f"Data shape {v.shape} is larger than buffer capacity {self.capacity}. Seems like the saved buffer is corrupted"
                 )
-        hf.close()
+                if storage_size_in_h5 is None:
+                    storage_size_in_h5 = v.shape[0]
+                else:
+                    assert storage_size_in_h5 == v.shape[0], (
+                        f"Batch dimension 0 is {v.shape[0]} for hdf5 entry {k} and it is different from the first shape {storage_size_in_h5}. Seems like the saved buffer is corrupted"
+                    )
+
+                splits = k.split(nested_key_separator)
+                current_dict = storage
+                for key in splits[:-1]:
+                    current_dict = current_dict.setdefault(key, {})
+
+                # Allocate the final field once. Loading a partial field to the
+                # GPU and then concatenating zero padding doubles its peak
+                # allocation, even though the final replay itself would fit.
+                dtype = torch.from_numpy(np.empty(0, dtype=v.dtype)).dtype
+                storage_tensor = torch.zeros((self.capacity, *v.shape[1:]), device=self.device, dtype=dtype)
+                row_bytes = int(np.prod(v.shape[1:])) * v.dtype.itemsize
+                chunk_rows = max(1, _HDF5_LOAD_CHUNK_BYTES // max(row_bytes, 1))
+                for start in range(0, v.shape[0], chunk_rows):
+                    stop = min(start + chunk_rows, v.shape[0])
+                    # from_numpy shares the bounded CPU read; copy_ transfers
+                    # directly into the destination without a GPU staging tensor.
+                    storage_tensor[start:stop].copy_(torch.from_numpy(v[start:stop]))
+                current_dict[splits[-1]] = storage_tensor
 
         self.storage = storage
         self._non_nested_key = [k for k, v in self.storage.items() if not isinstance(v, Mapping)][0]
@@ -209,6 +205,8 @@ class DictBuffer:
             loaded_config = json.load(f)
         if "__target__" in loaded_config:
             del loaded_config["__target__"]
+        if device is not None:
+            loaded_config["device"] = device
         # Old buffers might not have these values
         _idx = None
         _is_full = None

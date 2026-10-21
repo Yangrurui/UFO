@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -113,6 +114,8 @@ def build_ufo_mjlab_config(
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
+    torque_penalty_weight: float | None = None,
+    torque_limit_weight: float | None = None,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
@@ -172,6 +175,22 @@ def build_ufo_mjlab_config(
         f"robot.control.normalize_action_to={robot_training.normalize_action_to}",
         *robot_training.hydra_overrides,
     ]
+    torque_weights = {
+        "penalty_torques": torque_penalty_weight,
+        "limits_torque": torque_limit_weight,
+    }
+    if any(value is not None for value in torque_weights.values()):
+        # Use the same signal semantics in the environment and saved learner config.
+        hydra_overrides.append("rewards.torque_reward_mode=dynamic_substep")
+        for name, value in torque_weights.items():
+            if value is None:
+                continue
+            if not math.isfinite(value) or value > 0:
+                raise ValueError(f"{name} weight must be finite and non-positive")
+            if name not in agent_cfg.aux_rewards:
+                raise ValueError(f"Agent preset does not expose {name}")
+            agent_cfg.aux_rewards_scaling[name] = float(value)
+            hydra_overrides.append(f"rewards.reward_scales.{name}={float(value)}")
     if cartwheel_aux_safe:
         hydra_overrides.extend(
             [
@@ -292,6 +311,10 @@ def _init_distributed(local_rank: int, world_size: int) -> None:
 
 def run_train(args: argparse.Namespace, log_dir: Path) -> None:
     device, _local_rank, rank, world_size = _select_device_and_rank(args.seed)
+    from humanoidverse.runtime_cpu import bind_worker_cpu_numa
+    affinity = bind_worker_cpu_numa(_local_rank, world_size)
+    if affinity is not None:
+        print(f"[INFO] Worker CPU affinity: {affinity}", flush=True)
     _init_distributed(_local_rank, world_size)
     seed = args.seed + rank
     cfg = build_ufo_mjlab_config(
@@ -319,6 +342,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
+        torque_penalty_weight=args.torque_penalty_weight,
+        torque_limit_weight=args.torque_limit_weight,
     )
     print(
         "[INFO] UFO train: "
@@ -330,7 +355,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
-        f"compile={cfg.agent.compile}",
+        f"compile={cfg.agent.compile}, aux_rewards_scaling={cfg.agent.aux_rewards_scaling}",
         flush=True,
     )
     try:
@@ -386,6 +411,15 @@ def launch(args: argparse.Namespace) -> None:
         + (
             "MUJOCO*",
             "UFO_CACHE_DIR",
+            "UFO_GRAD_BUCKET_MB",
+            "UFO_COALESCE_SYNC",
+            "UFO_CPU_OPTIMIZER_STEPS",
+            "UFO_CPU_NUMA_BIND",
+            "UFO_FP16_BUCKET_MB",
+            "UFO_FUSED_ADAM",
+            "UFO_GRAD_COMM_PRECISION",
+            "UFO_COMM_CALIBRATION_CALLS",
+            "UFO_COMM_CALIBRATION_OUTPUT",
             "BFMZERO_MJLAB_CACHE_DIR",
             "UV_CACHE_DIR",
             "PYTHONPYCACHEPREFIX",
@@ -470,6 +504,14 @@ def parse_args() -> argparse.Namespace:
         "--cartwheel-aux-safe",
         action="store_true",
         help="Use a cartwheel-safe FB auxiliary reward set: remove locomotion contact/foot-shape penalties and reduce action-rate penalty.",
+    )
+    parser.add_argument(
+        "--torque-penalty-weight", type=float, default=None,
+        help="Weight for substep-mean squared applied torque; enables dynamic substep torque rewards.",
+    )
+    parser.add_argument(
+        "--torque-limit-weight", type=float, default=None,
+        help="Weight for substep-mean clipped PD demand normalized by each joint's nominal effort limit.",
     )
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
